@@ -46,12 +46,23 @@ pub use typenum;
 /// let long: FixedVector<_, typenum::U5> = FixedVector::from(base);
 /// assert_eq!(&long[..], &[1, 2, 3, 4, 0]);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, Derivative, RlpDecodable)]
+#[derive(Debug, Clone, Serialize, Deserialize, Derivative)]
 #[derivative(PartialEq, Eq, Hash(bound = "T: std::hash::Hash"))]
 #[serde(transparent)]
 pub struct FixedVector<T, N> {
     vec: Vec<T>,
     _phantom: PhantomData<N>,
+}
+
+impl<T: alloy_rlp::Decodable, N: Unsigned> alloy_rlp::Decodable for FixedVector<T, N> {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let vec = Vec::<T>::decode(buf)?;
+
+        Ok(Self {
+            vec,
+            _phantom: PhantomData
+        })
+    }
 }
 
 impl<T, N: Unsigned> FixedVector<T, N> {

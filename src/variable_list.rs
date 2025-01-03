@@ -1,6 +1,5 @@
 use crate::tree_hash::vec_tree_hash_root;
 use crate::Error;
-use alloy_rlp::RlpDecodable;
 use derivative::Derivative;
 use serde_derive::{Deserialize, Serialize};
 use std::marker::PhantomData;
@@ -48,12 +47,23 @@ pub use typenum;
 /// // Push a value to if it _does_ exceed the maximum.
 /// assert!(long.push(6).is_err());
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, Derivative, RlpDecodable)]
+#[derive(Debug, Clone, Serialize, Deserialize, Derivative)]
 #[derivative(PartialEq, Eq, Hash(bound = "T: std::hash::Hash"))]
 #[serde(transparent)]
 pub struct VariableList<T, N> {
     vec: Vec<T>,
     _phantom: PhantomData<N>,
+}
+
+impl<T: alloy_rlp::Decodable, N: Unsigned> alloy_rlp::Decodable for VariableList<T, N> {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let vec = Vec::<T>::decode(buf)?;
+
+        Ok(Self {
+            vec,
+            _phantom: PhantomData
+        })
+    }
 }
 
 /// Maximum number of elements to pre-allocate in `try_from_iter`.
