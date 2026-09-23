@@ -1,4 +1,5 @@
 use crate::tree_hash::progressive_vec_tree_hash_root;
+use crate::Error;
 use serde::Deserialize;
 use serde_derive::Serialize;
 use std::any::TypeId;
@@ -15,12 +16,12 @@ use typenum::{Unsigned, U0};
 ///
 /// - Merkleization uses the progressive scheme of EIP-7916 (a right-leaning spine of binary
 ///   subtrees whose capacities grow by 4x), so the hash tree root is independent of any limit.
-/// - The length limit `N` is optional. Deserialization enforces it. `new` and `push` do not.
+/// - The length limit `N` is optional. A non-zero limit is enforced on construction and mutation.
 ///
 /// The type parameter `N` is a [`typenum`] unsigned integer. The default `U0` means no limit, so
-/// deserialization accepts any length. A non-zero `N` rejects an input with more than `N` elements
-/// before it allocates space for them. The limit does not change the SSZ encoding or the hash tree
-/// root. You can add or change it on a field without a consensus change.
+/// the list can have any length. SSZ decoding rejects inputs with more than `N` elements for a
+/// non-zero `N` before allocating space for them. The limit does not change the SSZ encoding or the
+/// hash tree root. You can add or change it on a field without a consensus change.
 ///
 /// Like `VariableList`, the list is backed by a Rust `Vec` and serialized identically to a plain
 /// list.
@@ -38,16 +39,17 @@ use typenum::{Unsigned, U0};
 /// let base: Vec<u64> = vec![1, 2, 3, 4];
 ///
 /// // No limit (default).
-/// let mut list: ProgressiveVariableList<u64> = ProgressiveVariableList::new(base.clone());
+/// let mut list: ProgressiveVariableList<u64> = ProgressiveVariableList::new(base.clone()).unwrap();
 /// assert_eq!(&list[..], &[1, 2, 3, 4]);
 ///
-/// // `push` never fails, even past the limit. The limit only guards deserialization.
-/// list.push(5);
+/// // `push` succeeds as long as the optional limit is not exceeded.
+/// list.push(5).unwrap();
 /// assert_eq!(&list[..], &[1, 2, 3, 4, 5]);
 ///
-/// // A limited list rejects oversized SSZ or JSON input.
+/// // A limited list rejects oversized input.
 /// type Bounded = ProgressiveVariableList<u64, U8>;
 /// assert_eq!(Bounded::max_len(), Some(8));
+/// assert!(Bounded::new(vec![0; 9]).is_err());
 /// ```
 #[derive(Clone, Serialize)]
 #[serde(transparent)]
@@ -76,14 +78,6 @@ impl<T: std::fmt::Debug, N> std::fmt::Debug for ProgressiveVariableList<T, N> {
 }
 
 impl<T, N> ProgressiveVariableList<T, N> {
-    /// Create a list from a `Vec`. This never fails and does not check the limit.
-    pub fn new(vec: Vec<T>) -> Self {
-        Self {
-            vec,
-            _phantom: PhantomData,
-        }
-    }
-
     /// Create an empty list.
     pub fn empty() -> Self {
         Self {
@@ -102,11 +96,6 @@ impl<T, N> ProgressiveVariableList<T, N> {
         self.vec.is_empty()
     }
 
-    /// Appends `value` to the back of `self`. This never fails and does not check the limit.
-    pub fn push(&mut self, value: T) {
-        self.vec.push(value);
-    }
-
     /// Returns the contents as a slice.
     pub fn as_slice(&self) -> &[T] {
         &self.vec
@@ -119,7 +108,37 @@ impl<T, N> ProgressiveVariableList<T, N> {
 }
 
 impl<T, N: Unsigned> ProgressiveVariableList<T, N> {
-    /// Returns the optional length limit enforced at deserialization.
+    /// Create a list from a `Vec`, returning an error if it exceeds the optional limit.
+    pub fn new(vec: Vec<T>) -> Result<Self, Error> {
+        if let Some(max) = Self::max_len() {
+            if vec.len() > max {
+                return Err(Error::OutOfBounds {
+                    i: vec.len(),
+                    len: max,
+                });
+            }
+        }
+        Ok(Self {
+            vec,
+            _phantom: PhantomData,
+        })
+    }
+
+    /// Appends `value` to the back of `self`, returning an error if it would exceed the optional limit.
+    pub fn push(&mut self, value: T) -> Result<(), Error> {
+        if let Some(max) = Self::max_len() {
+            if self.vec.len() >= max {
+                return Err(Error::OutOfBounds {
+                    i: self.vec.len() + 1,
+                    len: max,
+                });
+            }
+        }
+        self.vec.push(value);
+        Ok(())
+    }
+
+    /// Returns the optional length limit.
     ///
     /// `None` means no limit (`N = U0`). `Some(n)` rejects any input with more than `n` elements.
     pub fn max_len() -> Option<usize> {
@@ -130,8 +149,10 @@ impl<T, N: Unsigned> ProgressiveVariableList<T, N> {
     }
 }
 
-impl<T, N> From<Vec<T>> for ProgressiveVariableList<T, N> {
-    fn from(vec: Vec<T>) -> Self {
+impl<T, N: Unsigned> TryFrom<Vec<T>> for ProgressiveVariableList<T, N> {
+    type Error = Error;
+
+    fn try_from(vec: Vec<T>) -> Result<Self, Error> {
         Self::new(vec)
     }
 }
@@ -148,12 +169,6 @@ impl<T, N> Default for ProgressiveVariableList<T, N> {
             vec: Vec::default(),
             _phantom: PhantomData,
         }
-    }
-}
-
-impl<T, N> FromIterator<T> for ProgressiveVariableList<T, N> {
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self::new(iter.into_iter().collect())
     }
 }
 
@@ -255,14 +270,18 @@ where
     }
 }
 
-impl<T, N> ssz::TryFromIter<T> for ProgressiveVariableList<T, N> {
-    type Error = std::convert::Infallible;
+impl<T, N: Unsigned> ssz::TryFromIter<T> for ProgressiveVariableList<T, N> {
+    type Error = Error;
 
     fn try_from_iter<I>(value: I) -> Result<Self, Self::Error>
     where
         I: IntoIterator<Item = T>,
     {
-        Ok(Self::new(value.into_iter().collect()))
+        let mut list = Self::empty();
+        for item in value {
+            list.push(item)?;
+        }
+        Ok(list)
     }
 }
 
@@ -298,7 +317,8 @@ where
                     )));
                 }
             }
-            return Ok(Self::new(crate::u8_bytes_to_vec(bytes)));
+            return Self::new(crate::u8_bytes_to_vec(bytes))
+                .map_err(|e| ssz::DecodeError::BytesInvalid(e.to_string()));
         }
 
         if T::is_ssz_fixed_len() {
@@ -331,9 +351,9 @@ where
             for chunk in bytes.chunks_exact(item_len) {
                 vec.push(T::from_ssz_bytes(chunk)?);
             }
-            Ok(Self::new(vec))
+            Self::new(vec).map_err(|e| ssz::DecodeError::BytesInvalid(e.to_string()))
         } else {
-            ssz::decode_list_of_variable_length_items(bytes, max_len).map(Self::new)
+            ssz::decode_list_of_variable_length_items(bytes, max_len)
         }
     }
 }
@@ -348,25 +368,20 @@ where
         D: serde::Deserializer<'de>,
     {
         let vec = Vec::<T>::deserialize(deserializer)?;
-        if let Some(max) = Self::max_len() {
-            if vec.len() > max {
-                return Err(serde::de::Error::custom(format!(
-                    "ProgressiveVariableList length {} exceeds maximum length {}",
-                    vec.len(),
-                    max
-                )));
-            }
-        }
-        Ok(Self::new(vec))
+        Self::new(vec).map_err(serde::de::Error::custom)
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<'a, T: arbitrary::Arbitrary<'a>, N> arbitrary::Arbitrary<'a>
+impl<'a, T: arbitrary::Arbitrary<'a>, N: Unsigned> arbitrary::Arbitrary<'a>
     for ProgressiveVariableList<T, N>
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(Self::new(<Vec<T>>::arbitrary(u)?))
+        let mut vec = <Vec<T>>::arbitrary(u)?;
+        if let Some(max) = Self::max_len() {
+            vec.truncate(max);
+        }
+        Self::new(vec).map_err(|_| arbitrary::Error::IncorrectFormat)
     }
 
     fn size_hint(depth: usize) -> (usize, Option<usize>) {
@@ -377,17 +392,68 @@ impl<'a, T: arbitrary::Arbitrary<'a>, N> arbitrary::Arbitrary<'a>
 #[cfg(test)]
 mod test {
     use super::*;
-    use ssz::{Decode, Encode};
+    use ssz::{Decode, Encode, TryFromIter};
     use tree_hash::TreeHash;
     use typenum::{U256, U4};
 
     #[test]
-    fn new_and_push_infallible() {
-        let mut list: ProgressiveVariableList<u64> = ProgressiveVariableList::new(vec![1, 2, 3]);
+    fn new_and_push_unbounded() {
+        let mut list: ProgressiveVariableList<u64> =
+            ProgressiveVariableList::new(vec![1, 2, 3]).unwrap();
         assert_eq!(&list[..], &[1, 2, 3]);
-        list.push(4);
+        list.push(4).unwrap();
         assert_eq!(&list[..], &[1, 2, 3, 4]);
         assert_eq!(list.len(), 4);
+    }
+
+    #[test]
+    fn limit_bounds_construction() {
+        type Bounded = ProgressiveVariableList<u64, U4>;
+        for len in [0, 3, 4] {
+            let values = vec![1; len];
+            assert_eq!(Bounded::new(values.clone()).unwrap().as_slice(), values);
+            assert_eq!(
+                Bounded::try_from(values.clone()).unwrap().as_slice(),
+                values
+            );
+            assert_eq!(
+                Bounded::try_from_iter(values.clone()).unwrap().as_slice(),
+                values
+            );
+        }
+        let err = Error::OutOfBounds { i: 5, len: 4 };
+        assert_eq!(Bounded::new(vec![1; 5]), Err(err.clone()));
+        assert_eq!(Bounded::try_from(vec![1; 5]), Err(err.clone()));
+        let iter = (0..5).chain(std::iter::once_with(|| panic!("iterated past the limit")));
+        assert_eq!(Bounded::try_from_iter(iter), Err(err));
+        assert_eq!(
+            ProgressiveVariableList::<u64>::try_from_iter(0..5)
+                .unwrap()
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn limit_bounds_push() {
+        let mut list = ProgressiveVariableList::<u64, U4>::new(vec![1, 2, 3]).unwrap();
+        list.push(4).unwrap();
+        assert_eq!(list.push(5), Err(Error::OutOfBounds { i: 5, len: 4 }));
+        assert_eq!(&list[..], &[1, 2, 3, 4]);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn limit_bounds_arbitrary() {
+        use arbitrary::{Arbitrary, Unstructured};
+
+        let data = [1; 32];
+        let unbounded =
+            ProgressiveVariableList::<u8>::arbitrary(&mut Unstructured::new(&data)).unwrap();
+        let bounded =
+            ProgressiveVariableList::<u8, U4>::arbitrary(&mut Unstructured::new(&data)).unwrap();
+        assert!(unbounded.len() > 4);
+        assert_eq!(bounded.as_slice(), &unbounded[..4]);
     }
 
     fn ssz_round_trip<T: Encode + Decode + std::fmt::Debug + PartialEq>(item: T) {
@@ -398,16 +464,22 @@ mod test {
 
     #[test]
     fn ssz_round_trip_bytes() {
-        ssz_round_trip::<ProgressiveVariableList<u8>>(ProgressiveVariableList::new(vec![]));
-        ssz_round_trip::<ProgressiveVariableList<u8>>(ProgressiveVariableList::new(vec![42; 100]));
+        ssz_round_trip::<ProgressiveVariableList<u8>>(
+            ProgressiveVariableList::new(vec![]).unwrap(),
+        );
+        ssz_round_trip::<ProgressiveVariableList<u8>>(
+            ProgressiveVariableList::new(vec![42; 100]).unwrap(),
+        );
         // Serializes identically to a plain byte-list.
-        let bytes = ProgressiveVariableList::<u8>::new(vec![1, 2, 3]);
+        let bytes = ProgressiveVariableList::<u8>::new(vec![1, 2, 3]).unwrap();
         assert_eq!(bytes.as_ssz_bytes(), vec![1, 2, 3]);
     }
 
     #[test]
     fn ssz_round_trip_u64() {
-        ssz_round_trip::<ProgressiveVariableList<u64>>(ProgressiveVariableList::new(vec![42; 9]));
+        ssz_round_trip::<ProgressiveVariableList<u64>>(
+            ProgressiveVariableList::new(vec![42; 9]).unwrap(),
+        );
     }
 
     #[test]
@@ -418,10 +490,14 @@ mod test {
 
     #[test]
     fn limit_bounds_fixed_len_ssz_decode() {
-        let ok = ProgressiveVariableList::<u64>::new(vec![1, 2, 3, 4]).as_ssz_bytes();
+        let ok = ProgressiveVariableList::<u64>::new(vec![1, 2, 3, 4])
+            .unwrap()
+            .as_ssz_bytes();
         assert!(ProgressiveVariableList::<u64, U4>::from_ssz_bytes(&ok).is_ok());
 
-        let too_many = ProgressiveVariableList::<u64>::new(vec![1, 2, 3, 4, 5]).as_ssz_bytes();
+        let too_many = ProgressiveVariableList::<u64>::new(vec![1, 2, 3, 4, 5])
+            .unwrap()
+            .as_ssz_bytes();
         assert!(ProgressiveVariableList::<u64, U4>::from_ssz_bytes(&too_many).is_err());
 
         assert!(ProgressiveVariableList::<u64>::from_ssz_bytes(&too_many).is_ok());
@@ -431,9 +507,11 @@ mod test {
     fn limit_bounds_variable_len_ssz_decode() {
         type Inner = ProgressiveVariableList<u8>;
         let items: Vec<Inner> = (0..5)
-            .map(|_| ProgressiveVariableList::new(vec![1]))
+            .map(|_| ProgressiveVariableList::new(vec![1]).unwrap())
             .collect();
-        let encoded = ProgressiveVariableList::<Inner>::new(items).as_ssz_bytes();
+        let encoded = ProgressiveVariableList::<Inner>::new(items)
+            .unwrap()
+            .as_ssz_bytes();
 
         assert!(ProgressiveVariableList::<Inner, U4>::from_ssz_bytes(&encoded).is_err());
         assert!(ProgressiveVariableList::<Inner>::from_ssz_bytes(&encoded).is_ok());
@@ -441,7 +519,9 @@ mod test {
 
     #[test]
     fn limit_bounds_byte_list_ssz_decode() {
-        let encoded = ProgressiveVariableList::<u8>::new(vec![0; 5]).as_ssz_bytes();
+        let encoded = ProgressiveVariableList::<u8>::new(vec![0; 5])
+            .unwrap()
+            .as_ssz_bytes();
         assert!(ProgressiveVariableList::<u8, U4>::from_ssz_bytes(&encoded).is_err());
         assert!(ProgressiveVariableList::<u8>::from_ssz_bytes(&encoded).is_ok());
     }
@@ -456,8 +536,8 @@ mod test {
     #[test]
     fn limit_does_not_change_encoding_or_root() {
         let values = vec![9u64, 8, 7];
-        let unbounded = ProgressiveVariableList::<u64>::new(values.clone());
-        let bounded = ProgressiveVariableList::<u64, U256>::new(values);
+        let unbounded = ProgressiveVariableList::<u64>::new(values.clone()).unwrap();
+        let bounded = ProgressiveVariableList::<u64, U256>::new(values).unwrap();
         assert_eq!(unbounded.as_ssz_bytes(), bounded.as_ssz_bytes());
         assert_eq!(unbounded.tree_hash_root(), bounded.tree_hash_root());
     }
@@ -465,7 +545,8 @@ mod test {
     #[test]
     fn serde_is_a_sequence() {
         // Matches `VariableList`: the default serde representation is a JSON sequence, not hex.
-        let list: ProgressiveVariableList<u8> = ProgressiveVariableList::new(vec![1, 2, 255]);
+        let list: ProgressiveVariableList<u8> =
+            ProgressiveVariableList::new(vec![1, 2, 255]).unwrap();
         let json = serde_json::to_string(&list).unwrap();
         assert_eq!(json, "[1,2,255]");
         assert_eq!(
@@ -488,10 +569,14 @@ mod test {
 
         // Deterministic and non-zero for a non-empty list.
         let bytes: Vec<u8> = (0..40).collect();
-        let root = ProgressiveVariableList::<u8>::new(bytes.clone()).tree_hash_root();
+        let root = ProgressiveVariableList::<u8>::new(bytes.clone())
+            .unwrap()
+            .tree_hash_root();
         assert_eq!(
             root,
-            ProgressiveVariableList::<u8>::new(bytes.clone()).tree_hash_root()
+            ProgressiveVariableList::<u8>::new(bytes.clone())
+                .unwrap()
+                .tree_hash_root()
         );
         assert_ne!(root, mix_in_length(&Hash256::ZERO, bytes.len()));
 

@@ -22,16 +22,7 @@ where
     N: Unsigned,
 {
     let bytes = deserializer.deserialize_str(PrefixedHexVisitor)?;
-    if let Some(max) = ProgressiveVariableList::<u8, N>::max_len() {
-        if bytes.len() > max {
-            return Err(D::Error::custom(format!(
-                "ProgressiveVariableList length {} exceeds maximum length {}",
-                bytes.len(),
-                max
-            )));
-        }
-    }
-    Ok(ProgressiveVariableList::new(bytes))
+    ProgressiveVariableList::new(bytes).map_err(D::Error::custom)
 }
 
 #[cfg(test)]
@@ -48,7 +39,7 @@ mod test {
     #[test]
     fn round_trip_hex() {
         let obj = Obj {
-            bytes: ProgressiveVariableList::new(vec![1, 2, 3, 255]),
+            bytes: ProgressiveVariableList::new(vec![1, 2, 3, 255]).unwrap(),
         };
         let json = serde_json::to_string(&obj).unwrap();
         assert_eq!(json, r#"{"bytes":"0x010203ff"}"#);

@@ -80,16 +80,7 @@ where
         while let Some(val) = seq.next_element::<WrappedListOwned<M>>()? {
             list.push(val.0);
         }
-        if let Some(max) = Self::Value::max_len() {
-            if list.len() > max {
-                return Err(A::Error::custom(format!(
-                    "ProgressiveVariableList length {} exceeds maximum length {}",
-                    list.len(),
-                    max
-                )));
-            }
-        }
-        Ok(ProgressiveVariableList::new(list))
+        ProgressiveVariableList::new(list).map_err(A::Error::custom)
     }
 }
 
@@ -119,9 +110,10 @@ mod test {
     fn round_trip_hex() {
         let obj = Obj {
             lists: ProgressiveVariableList::new(vec![
-                ProgressiveVariableList::new(vec![1, 2, 3]),
-                ProgressiveVariableList::new(vec![255]),
-            ]),
+                ProgressiveVariableList::new(vec![1, 2, 3]).unwrap(),
+                ProgressiveVariableList::new(vec![255]).unwrap(),
+            ])
+            .unwrap(),
         };
         let json = serde_json::to_string(&obj).unwrap();
         assert_eq!(json, r#"{"lists":["0x010203","0xff"]}"#);

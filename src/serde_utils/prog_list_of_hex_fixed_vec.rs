@@ -59,17 +59,7 @@ where
             list.push(val.0);
         }
 
-        if let Some(max) = Self::Value::max_len() {
-            if list.len() > max {
-                return Err(A::Error::custom(format!(
-                    "ProgressiveVariableList length {} exceeds maximum length {}",
-                    list.len(),
-                    max
-                )));
-            }
-        }
-
-        Ok(ProgressiveVariableList::new(list))
+        ProgressiveVariableList::new(list).map_err(A::Error::custom)
     }
 }
 

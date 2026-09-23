@@ -28,15 +28,6 @@ where
         D: Deserializer<'de>,
     {
         let vec = Vec::<T>::context_deserialize(deserializer, context)?;
-        if let Some(max) = Self::max_len() {
-            if vec.len() > max {
-                return Err(D::Error::custom(format!(
-                    "ProgressiveVariableList length {} exceeds maximum length {}",
-                    vec.len(),
-                    max
-                )));
-            }
-        }
-        Ok(ProgressiveVariableList::new(vec))
+        ProgressiveVariableList::new(vec).map_err(D::Error::custom)
     }
 }
