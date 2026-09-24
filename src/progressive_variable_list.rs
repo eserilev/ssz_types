@@ -367,8 +367,33 @@ where
     where
         D: serde::Deserializer<'de>,
     {
-        let vec = Vec::<T>::deserialize(deserializer)?;
-        Self::new(vec).map_err(serde::de::Error::custom)
+        deserializer.deserialize_seq(SeqVisitor(PhantomData))
+    }
+}
+
+/// Pushes one element at a time, so an oversized input fails at the first extra element.
+struct SeqVisitor<T, N>(PhantomData<(T, N)>);
+
+impl<'de, T, N> serde::de::Visitor<'de> for SeqVisitor<T, N>
+where
+    T: Deserialize<'de>,
+    N: Unsigned,
+{
+    type Value = ProgressiveVariableList<T, N>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "a list")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut list = ProgressiveVariableList::empty();
+        while let Some(value) = seq.next_element()? {
+            list.push(value).map_err(serde::de::Error::custom)?;
+        }
+        Ok(list)
     }
 }
 
@@ -552,6 +577,24 @@ mod test {
         assert_eq!(
             serde_json::from_str::<ProgressiveVariableList<u8>>(&json).unwrap(),
             list
+        );
+    }
+
+    #[test]
+    fn serde_accepts_list_at_limit() {
+        let list = serde_json::from_str::<ProgressiveVariableList<u64, U4>>("[1,2,3,4]").unwrap();
+        assert_eq!(&list[..], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn serde_fails_at_first_item_past_limit() {
+        // The item after the limit is not a number. Only an early check reports the limit.
+        let json = r#"[1,2,3,4,5,"not a number"]"#;
+        let err = serde_json::from_str::<ProgressiveVariableList<u64, U4>>(json).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Index out of bounds: index 5, length 4"),
+            "{err}"
         );
     }
 
