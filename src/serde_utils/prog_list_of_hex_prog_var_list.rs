@@ -76,11 +76,11 @@ where
     where
         A: serde::de::SeqAccess<'a>,
     {
-        let mut list = Vec::new();
+        let mut list = ProgressiveVariableList::empty();
         while let Some(val) = seq.next_element::<WrappedListOwned<M>>()? {
-            list.push(val.0);
+            list.push(val.0).map_err(A::Error::custom)?;
         }
-        ProgressiveVariableList::new(list).map_err(A::Error::custom)
+        Ok(list)
     }
 }
 
