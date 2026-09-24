@@ -99,6 +99,7 @@ where
 mod test {
     use crate::ProgressiveVariableList;
     use serde_derive::{Deserialize, Serialize};
+    use typenum::U2;
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     struct Obj {
@@ -128,5 +129,32 @@ mod test {
         let json = serde_json::to_string(&obj).unwrap();
         assert_eq!(json, r#"{"lists":[]}"#);
         assert_eq!(serde_json::from_str::<Obj>(&json).unwrap(), obj);
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Bounded {
+        #[serde(with = "crate::serde_utils::prog_list_of_hex_prog_var_list")]
+        lists: ProgressiveVariableList<ProgressiveVariableList<u8>, U2>,
+    }
+
+    #[test]
+    fn accepts_list_at_limit() {
+        let json = r#"{"lists":["0x01","0x02"]}"#;
+        assert_eq!(
+            serde_json::from_str::<Bounded>(json).unwrap().lists.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn fails_at_first_item_past_limit() {
+        // The item after the limit is not hex. Only an early check reports the limit.
+        let json = r#"{"lists":["0x01","0x02","0x03","not hex"]}"#;
+        let err = serde_json::from_str::<Bounded>(json).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Index out of bounds: index 3, length 2"),
+            "{err}"
+        );
     }
 }

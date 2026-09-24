@@ -71,3 +71,34 @@ where
 {
     deserializer.deserialize_seq(Visitor::default())
 }
+
+#[cfg(test)]
+mod test {
+    use crate::{FixedVector, ProgressiveVariableList};
+    use serde_derive::Deserialize;
+    use typenum::{U1, U2};
+
+    #[derive(Debug, Deserialize)]
+    struct Bounded {
+        #[serde(with = "crate::serde_utils::prog_list_of_hex_fixed_vec")]
+        vecs: ProgressiveVariableList<FixedVector<u8, U1>, U2>,
+    }
+
+    #[test]
+    fn accepts_list_at_limit() {
+        let json = r#"{"vecs":["0x01","0x02"]}"#;
+        assert_eq!(serde_json::from_str::<Bounded>(json).unwrap().vecs.len(), 2);
+    }
+
+    #[test]
+    fn fails_at_first_item_past_limit() {
+        // The item after the limit is not hex. Only an early check reports the limit.
+        let json = r#"{"vecs":["0x01","0x02","0x03","not hex"]}"#;
+        let err = serde_json::from_str::<Bounded>(json).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Index out of bounds: index 3, length 2"),
+            "{err}"
+        );
+    }
+}
