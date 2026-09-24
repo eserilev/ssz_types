@@ -1,4 +1,5 @@
 use crate::tree_hash::progressive_vec_tree_hash_root;
+use crate::variable_list::MAX_ELEMENTS_TO_PRE_ALLOCATE;
 use crate::Error;
 use serde::Deserialize;
 use serde_derive::Serialize;
@@ -147,6 +148,14 @@ impl<T, N: Unsigned> ProgressiveVariableList<T, N> {
             n => Some(n),
         }
     }
+
+    /// The size hint comes from untrusted input, so the limit and a constant cap the reservation.
+    fn capacity_to_reserve((lower, upper): (usize, Option<usize>)) -> usize {
+        let cap = Self::max_len().map_or(MAX_ELEMENTS_TO_PRE_ALLOCATE, |max| {
+            max.min(MAX_ELEMENTS_TO_PRE_ALLOCATE)
+        });
+        upper.unwrap_or(lower).min(cap)
+    }
 }
 
 impl<T, N: Unsigned> TryFrom<Vec<T>> for ProgressiveVariableList<T, N> {
@@ -277,8 +286,10 @@ impl<T, N: Unsigned> ssz::TryFromIter<T> for ProgressiveVariableList<T, N> {
     where
         I: IntoIterator<Item = T>,
     {
-        let mut list = Self::empty();
-        for item in value {
+        let iter = value.into_iter();
+        let capacity = Self::capacity_to_reserve(iter.size_hint());
+        let mut list = Self::new(Vec::with_capacity(capacity))?;
+        for item in iter {
             list.push(item)?;
         }
         Ok(list)
@@ -465,6 +476,43 @@ mod test {
         list.push(4).unwrap();
         assert_eq!(list.push(5), Err(Error::OutOfBounds { i: 5, len: 4 }));
         assert_eq!(&list[..], &[1, 2, 3, 4]);
+    }
+
+    /// Yields the items of a `Vec` but claims a size hint of `usize::MAX`.
+    struct LyingIter(std::vec::IntoIter<u64>);
+
+    impl Iterator for LyingIter {
+        type Item = u64;
+
+        fn next(&mut self) -> Option<u64> {
+            self.0.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (usize::MAX, Some(usize::MAX))
+        }
+    }
+
+    #[test]
+    fn try_from_iter_reserves_the_exact_size_hint() {
+        let list = ProgressiveVariableList::<u64>::try_from_iter(0..100).unwrap();
+        assert_eq!(list.vec.capacity(), 100);
+    }
+
+    #[test]
+    fn try_from_iter_caps_a_lying_size_hint_at_the_limit() {
+        let iter = LyingIter(vec![1, 2, 3].into_iter());
+        let list = ProgressiveVariableList::<u64, U4>::try_from_iter(iter).unwrap();
+        assert_eq!(&list[..], &[1, 2, 3]);
+        assert_eq!(list.vec.capacity(), 4);
+    }
+
+    #[test]
+    fn try_from_iter_caps_a_lying_size_hint_without_a_limit() {
+        let iter = LyingIter(vec![1, 2, 3].into_iter());
+        let list = ProgressiveVariableList::<u64>::try_from_iter(iter).unwrap();
+        assert_eq!(&list[..], &[1, 2, 3]);
+        assert_eq!(list.vec.capacity(), MAX_ELEMENTS_TO_PRE_ALLOCATE);
     }
 
     #[cfg(feature = "arbitrary")]
